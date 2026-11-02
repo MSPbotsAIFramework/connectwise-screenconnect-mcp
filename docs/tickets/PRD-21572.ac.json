@@ -1,0 +1,72 @@
+[
+  {
+    "id": "TC1",
+    "ac": "AC1",
+    "text": "Given valid instance-url and auth-secret headers, a session_id that belongs to session_group, and a PowerShell script, when screenconnect_invoke_command is called and a RanCommand output event appears before timeout, then it returns the command's standard output text.",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_invoke_command_returns_stdout_on_ran_command_event"]
+  },
+  {
+    "id": "TC2",
+    "ac": "AC2",
+    "text": "Given a session_id that exists but belongs to a different group than the supplied session_group, when screenconnect_invoke_command is called, then it returns a structured 'session not in expected group' error and no command is sent to the session.",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_invoke_command_group_mismatch_blocks_command"]
+  },
+  {
+    "id": "TC3",
+    "ac": "AC3",
+    "text": "Given a request missing X-ScreenConnect-Auth-Secret, when screenconnect_invoke_command is called, then it returns 401 naming exactly the missing header, and no upstream call is attempted.",
+    "type": "auto",
+    "tests": ["tests/test_middleware.py::test_missing_auth_secret_header_returns_401"]
+  },
+  {
+    "id": "TC4",
+    "ac": "AC4",
+    "text": "Given the upstream ScreenConnect call returns 401 (secret rejected), when screenconnect_invoke_command is called, then it returns a structured 'auth rejected' error that never includes the secret value.",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_invoke_command_upstream_401_maps_to_auth_rejected"]
+  },
+  {
+    "id": "TC5",
+    "ac": "AC4",
+    "text": "Given the upstream ScreenConnect call returns 404 on the extension path, when screenconnect_invoke_command is called, then it returns a structured 'extension not installed/enabled' error, distinct from TC4's error.",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_invoke_command_upstream_404_maps_to_extension_not_installed"]
+  },
+  {
+    "id": "TC6",
+    "ac": "AC5",
+    "text": "Given the command is queued successfully but no RanCommand event is observed before timeout elapses, when screenconnect_invoke_command is called, then it returns a structured timeout error, distinct from a failure error.",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_invoke_command_times_out_waiting_for_ran_command"]
+  },
+  {
+    "id": "TC7",
+    "ac": "AC6",
+    "text": "Given two concurrent calls with different instance-url/auth-secret header pairs and different session_ids, when both run concurrently, then each call's upstream requests use only its own header-supplied credentials and its own session id -- no credential, session, or output data crosses between the two.",
+    "type": "auto",
+    "tests": ["tests/test_middleware.py::test_concurrent_requests_do_not_share_credentials_or_session"]
+  },
+  {
+    "id": "TC8",
+    "ac": "AC7",
+    "text": "Given a session_id that does not exist on the instance at all, when screenconnect_invoke_command is called, then it returns a structured 'session not found' error and no command is sent.",
+    "type": "auto",
+    "tests": ["tests/test_tools.py::test_invoke_command_unknown_session_returns_not_found"]
+  },
+  {
+    "id": "TC9",
+    "ac": "AC1",
+    "text": "Given a live ScreenConnect instance with the RESTful API Manager extension installed, when screenconnect_invoke_command runs a real PowerShell command (e.g. a simple echo), then the returned output text matches what the command actually printed.",
+    "type": "manual",
+    "steps": [
+      "Using a ScreenConnect instance with the RESTful API Manager extension installed and configured, and a known session_id/session_group on it",
+      "Call screenconnect_invoke_command with a simple, side-effect-free command (e.g. 'Write-Output hello-mspbots') and a timeout generous enough for the round trip",
+      "Observe the tool's returned output text"
+    ],
+    "expect": "The returned text contains 'hello-mspbots'. This also confirms the Open-questions assumptions about the RanCommand event's output field shape and the GetSessionDetailsBySessionID polling/correlation behavior.",
+    "result": "untested",
+    "notes": "needs a real vendor account (ScreenConnect instance with RESTful API Manager extension installed) -- not a blocker per mcp-track.md 2.5"
+  }
+]
