@@ -4,42 +4,54 @@
     "ac": "AC1",
     "text": "Given valid instance-url and auth-secret headers, and a session group with active sessions, when screenconnect_get_live_data is called with that group, then it returns the live session list (session_id, name, group_path, is_connected, guest_info) sourced from GetSessionsByFilter.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_get_live_data_returns_session_list"]
+    "tests": ["tests/test_tools.py::test_get_live_data_returns_session_list"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_get_live_data_returns_session_list -v @ c921584 -> 1 passed. Asserts the filter string sent upstream (\"SessionType = 'Access' and GroupPath = 'All Machines'\"), the CTRLAuthHeader value, and the mapped output fields against a httpx.MockTransport response."
   },
   {
     "id": "TC2",
     "ac": "AC2",
     "text": "Given valid headers and a session group with zero active sessions, when screenconnect_get_live_data is called, then it returns an empty list, not an error.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_get_live_data_empty_group_returns_empty_list"]
+    "tests": ["tests/test_tools.py::test_get_live_data_empty_group_returns_empty_list"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_get_live_data_empty_group_returns_empty_list -v @ c921584 -> 1 passed. Mocked upstream returns `[]`; asserts the client returns `[]`, not an exception/error envelope."
   },
   {
     "id": "TC3",
     "ac": "AC3",
     "text": "Given a request missing X-ScreenConnect-Auth-Secret, when screenconnect_get_live_data is called, then it returns 401 naming exactly the missing header, and no HTTP request is made to the ScreenConnect instance.",
     "type": "auto",
-    "tests": ["tests/test_middleware.py::test_missing_auth_secret_header_returns_401"]
+    "tests": ["tests/test_middleware.py::test_missing_auth_secret_header_returns_401"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_middleware.py::test_missing_required_header_returns_401 -v @ c921584 -> 4 passed (parametrized: no headers, instance-url only, auth-secret only, blank instance-url). Each asserts HTTP 401 and `required_headers`/`message` naming the missing header(s); no upstream call is possible since the middleware returns before the request reaches FastMCP. Note: the actual test function is parametrized as `test_missing_required_header_returns_401` (covers this ticket's `tests` entry above, which named a narrower id)."
   },
   {
     "id": "TC4",
     "ac": "AC4",
     "text": "Given the upstream ScreenConnect call returns 401 (secret rejected), when screenconnect_get_live_data is called, then it returns a structured 'auth rejected' error and the secret value never appears in the response or in any log line.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_get_live_data_upstream_401_maps_to_auth_rejected"]
+    "tests": ["tests/test_tools.py::test_get_live_data_upstream_401_maps_to_auth_rejected"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_get_live_data_upstream_401_maps_to_auth_rejected -v @ c921584 -> 1 passed. Mocked upstream 401; asserts error envelope {\"code\":\"unauthorized\",\"message\":\"ScreenConnect rejected the auth secret for this instance\",\"retryable\":false} and that the literal secret value does not appear in the error message."
   },
   {
     "id": "TC5",
     "ac": "AC4",
     "text": "Given the upstream ScreenConnect call returns 404 on the extension path, when screenconnect_get_live_data is called, then it returns a structured 'extension not installed/enabled' error, distinct from the auth-rejected error in TC4.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_get_live_data_upstream_404_maps_to_extension_not_installed"]
+    "tests": ["tests/test_tools.py::test_get_live_data_upstream_404_maps_to_extension_not_installed"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_tools.py::test_get_live_data_upstream_404_maps_to_extension_not_installed -v @ c921584 -> 1 passed. Mocked upstream 404; asserts error code \"not_found\" and a message distinct from TC4's auth-rejected message (mentions \"extension\")."
   },
   {
     "id": "TC6",
     "ac": "AC5",
     "text": "Given two concurrent calls with different instance-url/auth-secret header pairs, when both are in flight at the same time, then each call's upstream request uses only its own header-supplied credentials -- no credential or response data crosses between the two.",
     "type": "auto",
-    "tests": ["tests/test_middleware.py::test_concurrent_requests_do_not_share_credentials"]
+    "tests": ["tests/test_middleware.py::test_concurrent_requests_do_not_share_credentials"],
+    "result": "pass",
+    "evidence": "uv run pytest tests/test_middleware.py::test_concurrent_requests_do_not_share_credentials -v @ c921584 -> 1 passed. Two interleaved async requests (asyncio.gather) with secrets tenant-a/tenant-b assert the contextvar-scoped credential seen before and after an await point is still the same tenant's -- no cross-request bleed. Backed by the shared-HTTP-client design (api_client.py: credentials are per-call Header values, the pool itself never holds any)."
   },
   {
     "id": "TC7",
@@ -52,6 +64,6 @@
     ],
     "expect": "The tool returns an empty list; it does not raise or return a distinct 'not found' error. This also confirms the Open-questions assumption about GetSessionsByFilter's no-match behavior.",
     "result": "untested",
-    "notes": "needs a real vendor account (ScreenConnect instance with RESTful API Manager extension installed) -- not a blocker per mcp-track.md 2.5"
+    "notes": "needs a real vendor account (ScreenConnect instance with RESTful API Manager extension installed) -- not a blocker per mcp-track.md 2.5. Also unverified for the same reason: the exact GetSessionsByFilter filter-string grammar (api_client.py::build_session_filter) and the upstream session JSON field names (api_client.py::map_session) -- both re-confirmed absent from ConnectWise's public reference page at dev time (fetched docs.connectwise.com/ScreenConnect_Documentation/Developers/RESTful_API_Manager on 2026-11-04), same gap the design already flagged."
   }
 ]
