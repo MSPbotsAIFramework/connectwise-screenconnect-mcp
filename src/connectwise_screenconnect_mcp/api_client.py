@@ -13,15 +13,16 @@
 # limitations under the License.
 """Async client for ConnectWise ScreenConnect's RESTful API Manager extension.
 
-Covers one method for v1: ``GetSessionsByFilter`` (PRD-21570). The module is
-shaped so sibling ticket PRD-21572's write tool (``SendCommandToSession``) can
-add a second method here without reworking this client (Tech design §4a).
+Covers ``GetSessionsByFilter`` (PRD-21570, read-only session list) and
+``GetSessionBySessionID`` / ``SendCommandToSession`` / ``GetSessionDetailsBySessionID``
+(PRD-21572, the queue-then-poll remote-command tool).
 """
 
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
@@ -70,12 +71,20 @@ def _get_shared_http_client() -> httpx.AsyncClient:
 # (connection error or timeout). The extension itself returns 401/403 when
 # CTRLAuthHeader does not match RESTfulAuthenticationSecret, and 404 when the
 # extension is not installed/enabled on the instance (AC4).
+#
+# 408 is not part of the upstream vendor's own status codes: screenconnect_invoke_command
+# (PRD-21572) raises ScreenConnectError(408, ...) itself, locally, when polling
+# GetSessionDetailsBySessionID never observes a correlated RanCommand event before the
+# caller's `timeout` elapses (AC5). Reusing this same status->code table keeps "timeout"
+# a structured, distinct error code (ticket's own Error mapping table requires it to be
+# distinct from a failure) without adding a second error-envelope code path.
 _STATUS_TO_CODE: dict[int, tuple[str, bool]] = {
     0: ("upstream_error", True),
     400: ("invalid_argument", False),
     401: ("unauthorized", False),
     403: ("unauthorized", False),
     404: ("not_found", False),
+    408: ("timeout", False),
     429: ("rate_limited", True),
 }
 
@@ -158,6 +167,54 @@ def map_session(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def extract_ran_command_output(session: dict[str, Any], after_epoch: float) -> str | None:
+    """Find the earliest ``RanCommand`` event after ``after_epoch`` and return its output text.
+
+    [Decision made by DEV01, PRD-21572] Neither the exact JSON field(s) that carry a RanCommand
+    event's output text, nor whether GetSessionDetailsBySessionID returns full event history or
+    only the latest event, are shown on ConnectWise's public reference page (ticket's own Open
+    questions). This assumes PascalCase fields consistent with every other field name already
+    confirmed in this repo (SessionID, Name, GroupPath, ...): an ``Events`` list of objects, each
+    with ``EventType`` (string, e.g. ``"RanCommand"``, ``"QueuedCommand"``) and ``Time``
+    (ISO-8601, UTC) and ``Data`` (the event payload text -- the command's stdout for a
+    RanCommand event). Correlation picks the earliest RanCommand event whose ``Time`` is at or
+    after ``after_epoch`` (the wall-clock time this invocation's SendCommandToSession call was
+    sent), per the Open-questions assumption. Not verified against a live instance (ac.json TC9).
+    If the real shape differs, only this function (and the call site in
+    ``tools/commands.py::invoke_command``) need to change -- the tool's AC1-AC7 contract does not.
+    Returns ``None`` (not an exception) when no matching event is found yet, so the caller can
+    keep polling until `timeout`.
+    """
+    events = session.get("Events")
+    if not isinstance(events, list):
+        return None
+    earliest: tuple[float, str] | None = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("EventType") != "RanCommand":
+            continue
+        occurred_at = _parse_event_time(event.get("Time"))
+        if occurred_at is None or occurred_at < after_epoch:
+            continue
+        data = event.get("Data")
+        if data is None:
+            continue
+        if earliest is None or occurred_at < earliest[0]:
+            earliest = (occurred_at, str(data))
+    return earliest[1] if earliest is not None else None
+
+
+def _parse_event_time(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
 class ScreenConnectClient:
     """Thin wrapper over the RESTful API Manager extension for one caller's credentials."""
 
@@ -177,7 +234,41 @@ class ScreenConnectClient:
         payload = await self._call("GetSessionsByFilter", [session_filter])
         return payload if isinstance(payload, list) else []
 
-    async def _call(self, method_name: str, params: list[Any]) -> Any:
+    async def get_session_by_id(self, session_id: str) -> dict[str, Any] | None:
+        """Resolve one session by id, or ``None`` if the instance has no such session.
+
+        [Decision made by DEV01, PRD-21572] GetSessionBySessionID's "not found" response shape
+        is not documented on ConnectWise's public reference page (same gap class as
+        ``build_session_filter``/``map_session`` above, PRD-21570). This assumes it mirrors
+        ``GetSessionsByFilter``'s empty-result convention -- HTTP 200 with a null/empty JSON
+        body for an id that does not exist, not an upstream 4xx. Not verified against a live
+        instance (ac.json TC9 covers the sibling live-call gap; this call shares the same
+        unverified-contract risk). If the real instance instead answers with a 404, `_call`
+        already classifies that generically as "extension not installed" (AC4's mapping), which
+        would misreport a plain not-found as an extension problem on the very first live run --
+        only this method would need a one-line fix, not the tool's AC1-AC7 contract.
+        """
+        payload = await self._call("GetSessionBySessionID", [session_id])
+        if not isinstance(payload, dict) or not payload:
+            return None
+        return payload
+
+    async def send_command_to_session(self, session_id: str, script: str) -> None:
+        """Queue a PowerShell command on a session (PRD-21572). Not idempotent, not retried.
+
+        Unlike the read calls above, retrying this on a transient 429/5xx/network failure could
+        run the command a second time on the remote machine (Tech design, Non-functional
+        "Idempotency"). ``allow_retry=False`` disables ``_call``'s generic retry loop for this
+        one call; the 401/403/404 error mapping (AC4) still applies unchanged.
+        """
+        await self._call("SendCommandToSession", [session_id, script], allow_retry=False)
+
+    async def get_session_details(self, session_id: str) -> dict[str, Any]:
+        """One poll of a session's current detail/event payload (PRD-21572). Read-only, retried as usual."""
+        payload = await self._call("GetSessionDetailsBySessionID", [session_id])
+        return payload if isinstance(payload, dict) else {}
+
+    async def _call(self, method_name: str, params: list[Any], *, allow_retry: bool = True) -> Any:
         http = self._http or _get_shared_http_client()
         url = f"{self.base_url}/{method_name}"
         headers = self._headers()
@@ -202,9 +293,11 @@ class ScreenConnectClient:
                 method_name, status, (time.monotonic() - t0) * 1000, attempt, self.instance_url,
             )
 
-            # This method is read-only and idempotent (GetSessionsByFilter), so retrying
-            # on 429/5xx/network failure cannot double-apply anything.
-            retryable = status == 429 or status == 0 or status >= 500
+            # Read calls (GetSessionsByFilter, GetSessionBySessionID, GetSessionDetailsBySessionID)
+            # are idempotent, so retrying on 429/5xx/network failure cannot double-apply anything.
+            # `allow_retry=False` (SendCommandToSession, PRD-21572) turns this off: that call is
+            # not idempotent, and a retried command would run on the remote machine a second time.
+            retryable = allow_retry and (status == 429 or status == 0 or status >= 500)
             if retryable and attempt < _MAX_RETRIES:
                 delay = _retry_delay(resp, attempt)
                 if time.monotonic() - started + delay < _CALL_BUDGET_SECONDS:

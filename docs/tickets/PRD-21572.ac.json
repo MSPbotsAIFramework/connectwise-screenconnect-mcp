@@ -4,56 +4,72 @@
     "ac": "AC1",
     "text": "Given valid instance-url and auth-secret headers, a session_id that belongs to session_group, and a PowerShell script, when screenconnect_invoke_command is called and a RanCommand output event appears before timeout, then it returns the command's standard output text.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_invoke_command_returns_stdout_on_ran_command_event"]
+    "tests": ["tests/test_tools.py::test_invoke_command_returns_stdout_on_ran_command_event"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_invoke_command_returns_stdout_on_ran_command_event -> 1 passed (PRD-21572, dev tick, commit history on dev/PRD-21572)"
   },
   {
     "id": "TC2",
     "ac": "AC2",
     "text": "Given a session_id that exists but belongs to a different group than the supplied session_group, when screenconnect_invoke_command is called, then it returns a structured 'session not in expected group' error and no command is sent to the session.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_invoke_command_group_mismatch_blocks_command"]
+    "tests": ["tests/test_tools.py::test_invoke_command_group_mismatch_blocks_command"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_invoke_command_group_mismatch_blocks_command -> 1 passed; test asserts SendCommandToSession handler was never invoked"
   },
   {
     "id": "TC3",
     "ac": "AC3",
     "text": "Given a request missing X-ScreenConnect-Auth-Secret, when screenconnect_invoke_command is called, then it returns 401 naming exactly the missing header, and no upstream call is attempted.",
     "type": "auto",
-    "tests": ["tests/test_middleware.py::test_missing_auth_secret_header_returns_401"]
+    "tests": ["tests/test_middleware.py::test_missing_auth_secret_header_returns_401"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_missing_auth_secret_header_returns_401 -> 1 passed; asserts resp.status_code == 401 and message == 'Missing header(s): X-ScreenConnect-Auth-Secret'. This check runs in GatewayCredentialsMiddleware before any tool (incl. screenconnect_invoke_command) is dispatched, so it applies to this tool unchanged."
   },
   {
     "id": "TC4",
     "ac": "AC4",
     "text": "Given the upstream ScreenConnect call returns 401 (secret rejected), when screenconnect_invoke_command is called, then it returns a structured 'auth rejected' error that never includes the secret value.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_invoke_command_upstream_401_maps_to_auth_rejected"]
+    "tests": ["tests/test_tools.py::test_invoke_command_upstream_401_maps_to_auth_rejected"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_invoke_command_upstream_401_maps_to_auth_rejected -> 1 passed; asserts envelope == {'error': {'code': 'unauthorized', 'message': 'ScreenConnect rejected the auth secret for this instance', 'retryable': False}} and 'secret-123' not in the raised error's message"
   },
   {
     "id": "TC5",
     "ac": "AC4",
     "text": "Given the upstream ScreenConnect call returns 404 on the extension path, when screenconnect_invoke_command is called, then it returns a structured 'extension not installed/enabled' error, distinct from TC4's error.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_invoke_command_upstream_404_maps_to_extension_not_installed"]
+    "tests": ["tests/test_tools.py::test_invoke_command_upstream_404_maps_to_extension_not_installed"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_invoke_command_upstream_404_maps_to_extension_not_installed -> 1 passed; asserts code == 'not_found', message != TC4's auth-rejected message, and 'extension' appears in the message"
   },
   {
     "id": "TC6",
     "ac": "AC5",
     "text": "Given the command is queued successfully but no RanCommand event is observed before timeout elapses, when screenconnect_invoke_command is called, then it returns a structured timeout error, distinct from a failure error.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_invoke_command_times_out_waiting_for_ran_command"]
+    "tests": ["tests/test_tools.py::test_invoke_command_times_out_waiting_for_ran_command"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_invoke_command_times_out_waiting_for_ran_command -> 1 passed; asserts status_code == 408, code == 'timeout', retryable is False, and the word 'fail' is absent from the message. Also see test_status_to_code_mapping[408-timeout-False]."
   },
   {
     "id": "TC7",
     "ac": "AC6",
     "text": "Given two concurrent calls with different instance-url/auth-secret header pairs and different session_ids, when both run concurrently, then each call's upstream requests use only its own header-supplied credentials and its own session id -- no credential, session, or output data crosses between the two.",
     "type": "auto",
-    "tests": ["tests/test_middleware.py::test_concurrent_requests_do_not_share_credentials_or_session"]
+    "tests": ["tests/test_middleware.py::test_concurrent_requests_do_not_share_credentials_or_session"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_concurrent_requests_do_not_share_credentials_or_session -> 1 passed; runs two full invoke_command flows concurrently (asyncio.gather) over one shared httpx client with a recording mock transport, asserts each upstream request's session_id matches its own tenant's secret and each call returns only its own session's output"
   },
   {
     "id": "TC8",
     "ac": "AC7",
     "text": "Given a session_id that does not exist on the instance at all, when screenconnect_invoke_command is called, then it returns a structured 'session not found' error and no command is sent.",
     "type": "auto",
-    "tests": ["tests/test_tools.py::test_invoke_command_unknown_session_returns_not_found"]
+    "tests": ["tests/test_tools.py::test_invoke_command_unknown_session_returns_not_found"],
+    "result": "pass",
+    "evidence": "uv run pytest -q -k test_invoke_command_unknown_session_returns_not_found -> 1 passed; GetSessionBySessionID mocked to return null, asserts status_code == 404, code == 'not_found', and SendCommandToSession handler was never invoked"
   },
   {
     "id": "TC9",
@@ -67,6 +83,6 @@
     ],
     "expect": "The returned text contains 'hello-mspbots'. This also confirms the Open-questions assumptions about the RanCommand event's output field shape and the GetSessionDetailsBySessionID polling/correlation behavior.",
     "result": "untested",
-    "notes": "needs a real vendor account (ScreenConnect instance with RESTful API Manager extension installed) -- not a blocker per mcp-track.md 2.5"
+    "notes": "needs a real vendor account (ScreenConnect instance with RESTful API Manager extension installed) -- not a blocker per mcp-track.md 2.5. Mocked-transport coverage for the same contract is TC1/TC6 above; TC9 only adds confirmation of the two Open-questions assumptions in api_client.py (get_session_by_id's not-found shape, extract_ran_command_output's event shape/correlation)."
   }
 ]
