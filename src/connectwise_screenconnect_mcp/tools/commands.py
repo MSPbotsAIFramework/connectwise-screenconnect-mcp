@@ -45,8 +45,16 @@ SessionGroup = Annotated[
     ),
 ]
 Script = Annotated[str, Field(description="PowerShell command text to run on the session's remote machine.", min_length=1)]
+# le=90: review round 2 must-fix. The MCP gateway kills a whole tool call at 120s. This
+# tool's polling loop (commands.py below) runs after two setup calls -- get_session_by_id and
+# send_command_to_session, each able to take up to api_client.py's own _CALL_BUDGET_SECONDS
+# (100s) under retry/backoff -- so any caller-supplied timeout above roughly 100-110s left no
+# headroom for the gateway's 120s budget (vendor-mcp-development SOP section 5 and section 14:
+# a single tool call, including retries, must stay under 120s). Capping at 90s keeps the worst
+# case under the gateway's limit so AC5's structured 408 timeout can still fire before the
+# gateway does.
 Timeout = Annotated[
-    int, Field(description="Seconds to wait for the command's output before giving up with a timeout error.", ge=1, le=600)
+    int, Field(description="Seconds to wait for the command's output before giving up with a timeout error.", ge=1, le=90)
 ]
 
 _DEFAULT_TIMEOUT_SECONDS = 60
