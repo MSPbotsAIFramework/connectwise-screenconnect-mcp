@@ -45,6 +45,9 @@ INSTRUCTIONS = (
     "documented RESTful API Manager extension.\n"
     "- screenconnect_get_live_data -> the live Access-session list for a session group "
     "(the same session list the ScreenConnect host client shows), via GetSessionsByFilter.\n"
+    "- screenconnect_invoke_command -> run a PowerShell command on one session's remote "
+    "machine and return its stdout (queues via SendCommandToSession, polls "
+    "GetSessionDetailsBySessionID for the output). Not idempotent: a retry re-runs the command.\n"
     "Every instance needs the RESTful API Manager extension installed and configured "
     "(RESTfulAuthenticationSecret set) -- a missing/unreachable extension returns a "
     "structured error distinct from a rejected secret."
@@ -117,8 +120,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     client_factory: Callable[[], ScreenConnectClient | None] = get_client_from_context
 
-    from .tools import sessions
+    from .tools import commands, sessions
 
     sessions.register(mcp, client_factory)
+    commands.register(mcp, client_factory)
 
     return mcp

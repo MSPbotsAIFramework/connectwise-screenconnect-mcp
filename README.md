@@ -2,7 +2,8 @@
 
 An [MCP](https://modelcontextprotocol.io) server for ConnectWise ScreenConnect's **RESTful API
 Manager** extension. It lets an AI agent read the live session list for a ScreenConnect session
-group (Access sessions), the same data the ScreenConnect host client shows.
+group (Access sessions), the same data the ScreenConnect host client shows, and run a PowerShell
+command on one of those sessions and get its output back.
 
 - Transport: MCP Streamable HTTP at `POST /mcp`, health probe at `GET /health`
 - Stateless and multi-tenant: credentials arrive on every request as HTTP headers and are
@@ -105,7 +106,8 @@ All tools return a JSON string.
 
 | Area | Tools |
 |---|---|
-| Sessions | `screenconnect_get_live_data` (**session_type**: `"Access"` only in v1, **session_group**) |
+| Sessions | `screenconnect_get_live_data` (read-only; **session_type**: `"Access"` only in v1, **session_group**) |
+| Sessions | `screenconnect_invoke_command` (write, not idempotent; **session_id**, **session_group**, **script**, *timeout* default 60s) |
 
 `screenconnect_get_live_data` calls the RESTful API Manager extension's `GetSessionsByFilter`
 method and returns each session's `session_id`, `name`, `group_path`, `is_connected`, and
@@ -113,8 +115,16 @@ method and returns each session's `session_id`, `name`, `group_path`, `is_connec
 that does not exist on the instance also returns an empty list — ScreenConnect's filter has no
 separate "group not found" signal.
 
-There is no write tool in this connector yet: `screenconnect_invoke_command` (send a command to a
-session) is sibling ticket PRD-21572's scope.
+`screenconnect_invoke_command` runs a PowerShell `script` on the remote machine behind
+`session_id` and returns its standard output text. Before sending anything it resolves
+`session_id` with `GetSessionBySessionID` and checks it belongs to the supplied `session_group` —
+a safety guard against running a command on the wrong machine, since this tool otherwise has no
+restriction on what `script` may contain. It then queues the command with `SendCommandToSession`
+and polls `GetSessionDetailsBySessionID` until a correlated `RanCommand` event appears or
+`timeout` seconds elapse. **Not idempotent**: calling it again re-runs the command, so it is never
+retried automatically on a failed send, unlike the read tool above. The command may still finish
+on the remote machine after a timeout is reported — the tool only reports that it stopped
+waiting.
 
 Errors come back as a JSON envelope instead of an exception:
 
@@ -123,8 +133,12 @@ Errors come back as a JSON envelope instead of an exception:
 ```
 
 `code` is one of `not_configured`, `unauthorized`, `not_found`, `invalid_argument`,
-`rate_limited`, `upstream_error`. The read call is retried with backoff on 429, 5xx and network
-errors. `X-ScreenConnect-Auth-Secret` never appears in an error message or a log line.
+`rate_limited`, `upstream_error`, `timeout` (the last one is local to this connector:
+`screenconnect_invoke_command` raises it when polling never observes the command's output before
+the caller's `timeout`, distinct from an upstream failure). Read calls are retried with backoff on
+429, 5xx and network errors; `screenconnect_invoke_command`'s `SendCommandToSession` call is never
+retried, since a retry could run the command a second time. `X-ScreenConnect-Auth-Secret` never
+appears in an error message or a log line.
 
 ## Run locally
 
@@ -162,6 +176,14 @@ curl -s http://localhost:8080/mcp \
   -H "X-ScreenConnect-Instance-Url: https://control.screenconnect.com" \
   -H "X-ScreenConnect-Auth-Secret: your-restful-auth-secret" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"screenconnect_get_live_data","arguments":{"session_type":"Access","session_group":"All Machines"}}}'
+
+# run a command on a session and get its output
+curl -s http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "X-ScreenConnect-Instance-Url: https://control.screenconnect.com" \
+  -H "X-ScreenConnect-Auth-Secret: your-restful-auth-secret" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"screenconnect_invoke_command","arguments":{"session_id":"<session-id>","session_group":"All Machines","script":"Write-Output hello","timeout":60}}}'
 ```
 
 Unit tests (no network access needed):
@@ -173,7 +195,8 @@ uv run pytest
 ## Decisions made by DEV01
 
 First-version scope decisions with no ticket-specific requirement to go on; see the design
-document (`docs/tickets/PRD-21570.md`) for the full reasoning and alternatives considered:
+documents (`docs/tickets/PRD-21570.md`, `docs/tickets/PRD-21572.md`) for the full reasoning and
+alternatives considered:
 
 - Built against the documented RESTful API Manager extension's `GetSessionsByFilter`, not the
   undocumented legacy `PageService.ashx/GetLiveData` endpoint Rewst's flow calls today.
@@ -192,6 +215,27 @@ document (`docs/tickets/PRD-21570.md`) for the full reasoning and alternatives c
 - The upstream JSON field names for a session object (`SessionID`, `Name`, `GroupPath`,
   `IsConnected`, `GuestInfo`) are an assumption for the same reason (`api_client.py::map_session`),
   also pending a live call.
+- `screenconnect_invoke_command` (PRD-21572) uses the same RESTful API Manager extension's
+  `SendCommandToSession` to queue a command and polls `GetSessionDetailsBySessionID` for a
+  `RanCommand` event, instead of the undocumented legacy `PageService.ashx/AddSessionEvents` +
+  `GetSessionDetails` flow Rewst's `cw_control.invoke_command` action calls today — same
+  documented-contract preference as the read tool above.
+- Added a `session_group` membership check (via `GetSessionBySessionID`) before sending the
+  command, even though the vendor's `SendCommandToSession` only takes a session id — the ticket's
+  own input shape (`session_group` alongside `session_id`) is treated as a caller-supplied safety
+  check against targeting the wrong machine, not just a label, since this tool runs arbitrary
+  PowerShell on a remote endpoint.
+- The exact JSON field(s) that carry a `RanCommand` event's output text, and whether
+  `GetSessionDetailsBySessionID` returns full event history or only the latest event, are not
+  published either (`api_client.py::extract_ran_command_output`). v1 assumes an `Events` list of
+  `{EventType, Time, Data}` objects and correlates by "earliest `RanCommand` event timestamped at
+  or after this call's `SendCommandToSession` request." **Not verified against a live instance**
+  (not a blocker; see `docs/tickets/PRD-21572.ac.json` TC9). If this shape differs, only
+  `extract_ran_command_output` and its call site need to change — the tool's input/output contract
+  does not.
+- `screenconnect_invoke_command` is deliberately **not retried** on a failed `SendCommandToSession`
+  call (429/5xx/network error): unlike every read call in this connector, retrying could run the
+  command a second time on the remote machine.
 
 ## License
 

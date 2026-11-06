@@ -11,20 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Credential middleware: 401 on missing required headers, per-request isolation (TC3, TC6)."""
+"""Credential middleware: 401 on missing required headers, per-request isolation (TC3, TC6, TC7)."""
 
 import asyncio
+import json
+from datetime import datetime, timezone
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
 from connectwise_screenconnect_mcp.__main__ import build_http_app
+from connectwise_screenconnect_mcp.api_client import ScreenConnectClient, ScreenConnectCredentials
 from connectwise_screenconnect_mcp.server import (
     GatewayCredentialsMiddleware,
     _credentials_var,
     create_mcp_server,
     get_client_from_context,
 )
+from connectwise_screenconnect_mcp.tools.commands import invoke_command
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 LIST_TOOLS = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
@@ -61,11 +66,20 @@ def test_missing_required_header_returns_401(headers, missing):
         assert name in resp.json()["message"]
 
 
+def test_missing_auth_secret_header_returns_401():
+    """TC3 (AC3): missing X-ScreenConnect-Auth-Secret specifically -- named exactly, no upstream call."""
+    with _client() as client:
+        resp = client.post("/mcp", json=LIST_TOOLS, headers=MCP_HEADERS | {"X-ScreenConnect-Instance-Url": "https://control.example.com"})
+    assert resp.status_code == 401
+    assert resp.json()["message"] == "Missing header(s): X-ScreenConnect-Auth-Secret"
+
+
 def test_tools_list_over_http():
     with _client() as client:
         resp = client.post("/mcp", json=LIST_TOOLS, headers=MCP_HEADERS | CREDS)
     assert resp.status_code == 200
     assert "screenconnect_get_live_data" in resp.text
+    assert "screenconnect_invoke_command" in resp.text
 
 
 def _run_middleware(headers: list[tuple[bytes, bytes]]) -> dict:
@@ -147,3 +161,47 @@ def test_credentials_repr_hides_secret():
         [(b"x-screenconnect-instance-url", b"https://control.example.com"), (b"x-screenconnect-auth-secret", b"very-secret-value")]
     )
     assert "very-secret-value" not in repr(seen["credentials"])
+
+
+def test_concurrent_requests_do_not_share_credentials_or_session():
+    """TC7 (AC6): two tenants calling screenconnect_invoke_command concurrently never cross session/secret.
+
+    Exercises the full validate -> queue -> poll flow (not just the header middleware above) with
+    one shared HTTP connection pool, the same production shape (api_client.py's module-level
+    pool): each in-flight call's upstream requests must carry only its own credentials and its
+    own session id.
+    """
+
+    seen: list[tuple[str, str, str]] = []  # (secret, session_id, method)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        secret = request.headers["CTRLAuthHeader"]
+        method = request.url.path.rsplit("/", 1)[-1]
+        session_id = json.loads(request.content)[0]
+        seen.append((secret, session_id, method))
+        if method == "GetSessionBySessionID":
+            return httpx.Response(200, json={"SessionID": session_id, "GroupPath": "All Machines"})
+        if method == "SendCommandToSession":
+            return httpx.Response(200, json=None)
+        if method == "GetSessionDetailsBySessionID":
+            now = datetime.now(timezone.utc).isoformat()
+            return httpx.Response(
+                200, json={"Events": [{"EventType": "RanCommand", "Time": now, "Data": f"out-{session_id}"}]}
+            )
+        raise AssertionError(f"unexpected method {method}")
+
+    shared_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def call(secret: str, session_id: str) -> str:
+        creds = ScreenConnectCredentials(instance_url="https://control.example.com", auth_secret=secret)
+        client = ScreenConnectClient(creds, http_client=shared_http)
+        return await invoke_command(client, session_id, "All Machines", "Write-Output hi", timeout=2, poll_interval=0.01)
+
+    async def both():
+        return await asyncio.gather(call("tenant-a-secret", "session-a"), call("tenant-b-secret", "session-b"))
+
+    results = asyncio.run(both())
+    assert sorted(results) == ["out-session-a", "out-session-b"]
+    for secret, session_id, _method in seen:
+        expected_session = "session-a" if secret == "tenant-a-secret" else "session-b"
+        assert session_id == expected_session, "a request used the other tenant's session id"
