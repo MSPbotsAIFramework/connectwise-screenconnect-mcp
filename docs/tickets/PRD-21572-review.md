@@ -1,5 +1,7 @@
 # PRD-21572 · Code review
 
+Status: frozen @ 00ab8b5
+
 ## Round 1 · 2026-11-05 · reviewed dev/PRD-21572 @ 1a75e9a (base 86c81ea)
 
 Verdict: changes requested
@@ -65,3 +67,15 @@ This is the third consecutive round with an unresolved must-fix (round 1 and rou
 ### Fixes (round 3)
 
 1. Round 3 must-fix #1 (`docs/tickets/PRD-21572-review.md:35`): rephrased round 2's finding #1 to cite SOP §5 in English only; the quoted Chinese clause is gone. Doc-only change; source tree unchanged since `ee54a52`. Round 3's own finding text also quoted the Chinese clause and the rule's original wording; both are paraphrased in English too. The repo-wide Chinese-character scan now returns nothing.
+
+## Round 4 · 2026-11-06 · reviewed dev/PRD-21572 @ 00ab8b5 (base 86c81ea)
+
+Verdict: approved
+
+Round 3's must-fix #1 is confirmed fixed: re-ran `grep -rnP '[\x{4e00}-\x{9fff}]' --exclude-dir=.git --exclude-dir=.venv .` on `00ab8b5` — no output (exit 1), repo-wide. Diffed `620d908..00ab8b5` directly: the only changes are to `docs/tickets/PRD-21572-review.md` (round 2's finding #1 text and round 3's own finding text, both reworded to drop the quoted Chinese clause and cite SOP §5 in English); no source file changed, confirming the source tree is unchanged since `ee54a52` as claimed in the round-3 fix note. Re-ran `uv run pytest -q` on `00ab8b5` (tree synced with `main@86c81ea`, same base as every prior round): 55 passed, 0 failed, no regression from the 38-test baseline. Re-ran the smoke test (`uv run python -m connectwise_screenconnect_mcp`, server started and stopped within the command, port 8080): `GET /health` -> `200`, `POST /mcp` with no credential headers -> `401`. README Connector section (`README.md` lines 14-84) re-diffed against `~/.claude/skills/vendor-mcp-development/reference/readme-connector-section.md`: still byte-identical.
+
+### Findings
+
+No findings. Everything rounds 1-3 already verified still holds on this unchanged source tree: scope matches the tech design; credentials stay header-only (no header value appears in any log call or error message in `commands.py`/`api_client.py`); `SendCommandToSession` stays excluded from retry (`allow_retry=False`, not idempotent); write-tool annotations (`destructiveHint=True, idempotentHint=False`) match SOP §2.7; `invoke_command`'s `Timeout` field is capped at `le=90` with the SOP-citing comment (round 2's fix, still in place); TC1-TC8 are real tests against a mocked transport, TC9 is correctly left manual/untested (not a blocker, `mcp-track.md` §2.5); round 1's two suggestions (clock-skew correlation risk, case-sensitive `session_group` compare) still stand as suggestions, unchanged and not required.
+
+This closes out the review: round 1's must-fix (Chinese text in the main ticket doc), round 2's must-fix (unenforceable `Timeout` upper bound vs. the gateway's 120s call budget), and round 3's must-fix (residual Chinese text in the review record itself, carried over from round 2's own finding) are all confirmed fixed with no regressions and no new findings.
